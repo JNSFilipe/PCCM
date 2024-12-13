@@ -1,11 +1,8 @@
 import numpy as np
-from enum import Enum, auto
+from utils import OT
 from scipy.stats import norm
 from scipy.optimize import brentq
 
-class OT(Enum):
-    CALL = auto()
-    PUT = auto()
 
 class BSM:
     @staticmethod

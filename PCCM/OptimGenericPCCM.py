@@ -1,34 +1,16 @@
 import optuna
 import numpy as np
-from enum import Enum
-from BlackScholesMerton import BSM, OT
-from utils import simulate_stock_price
+from utils import OExp, OT
+from OptionModels import BSM
+from joblib import Parallel, delayed  
+from PriceModels import static_vol_brownian
 # from optuna.visualization import plot_intermediate_values
-
-
-class OExp(Enum):
-    ONE_WEEK = 1/52  # 1 week (in years)
-    TWO_WEEKS = 2/52  # 2 weeks (in years)
-    THREE_WEEKS = 3/52  # 3 weeks (in years)
-    ONE_MONTH = 1/12  # 1 month (in years)
-    TWO_MONTHS = 2/12  # 2 months (in years)
-    THREE_MONTHS = 3/12  # 3 months (in years)
-    FOUR_MONTHS = 4/12  # 4 months (in years)
-    SIX_MONTHS = 6/12  # 6 months (in years)
-    EIGHT_MONTHS = 8/12  # 8 months (in years)
-    NINE_MONTHS = 9/12  # 9 months (in years)
-    ONE_YEAR = 1  # 1 year (in years)
-
-    def __str__(self):
-        return self.name.replace('_', ' ').title()
-
 
 UNDERLYING_PRICE = 100
 INTEREST_RATE = 0.05
-VOLATILITY = 0.1
+VOLATILITY = 0.3
 SHORT_DELTA = 0.15
 LONG_DELTA = 0.7
-
 
 def premium_from_delta(delta, S, t):
     # Calculate strike price and premium for the long Call to buy
@@ -41,37 +23,34 @@ def premium_from_delta(delta, S, t):
         OT.CALL
     )
 
-
-def PCCM_n_short_against_one_long_profit(n, long_expiration, short_expiration, N=100):
+def PCCM_n_short_against_one_long_profit(n, long_delta, long_expiration, short_delta, short_expiration, N=500):
 
     # Calculate strike price and premium for the long Call to buy
     long_sp, long_premium_buy = premium_from_delta(
-        LONG_DELTA, UNDERLYING_PRICE, long_expiration)
+        long_delta, UNDERLYING_PRICE, long_expiration)
 
-    profit = []
-    time = []
-    for _ in range(N):  # Repeat N times, to get an average result
+    def single_simulation():
         pnl = []
         exercised = False
         S = UNDERLYING_PRICE
         for _ in range(n):
-            K, C = premium_from_delta(SHORT_DELTA, S, short_expiration)
-            S = simulate_stock_price(
+            K, C = premium_from_delta(short_delta, S, short_expiration)
+            S = static_vol_brownian(
                 S, VOLATILITY, short_expiration.value, risk_free_rate=INTEREST_RATE)[0]
 
-            # Check if price drops bellow the short strike -> Assignement
-            if S < K:  # If so, Assignement occurs
+            # Check if price drops below the short strike -> Assignment
+            if S < K:
                 # Must buy 100 at long_sp to cover
                 # Must sell 100 at K
                 # Must add the profit from selling the short call (C)
                 pnl.append(100*(K-long_sp) + 100*C)
                 exercised = True
-                n = len(pnl)  # n stops early, so update it
                 break  # Lost underlying, must stop
-            else:  # There is no assignemnt, keep on going
+            else:
+                # There is no assignment, keep on going
                 pnl.append(100*C)
 
-        if not exercised:  # If the option did not get exercised as colateral, sell it
+        if not exercised:
             # Calculate strike price and premium for the short Call to sell
             long_premium_sell = BSM.premium(
                 S,
@@ -82,14 +61,23 @@ def PCCM_n_short_against_one_long_profit(n, long_expiration, short_expiration, N
                 option_type=OT.CALL
             )
             pnl.append(100 * long_premium_sell)
-        profit.append(sum(pnl) - 100*long_premium_buy)
-        time.append(n*short_expiration.value)
 
-    return sum(profit)/N, sum(time)/N
+        return sum(pnl) - 100*long_premium_buy, n*short_expiration.value
+
+    # Use joblib's Parallel to run simulations in parallel
+    results = Parallel(n_jobs=-1)(delayed(single_simulation)() for _ in range(N))
+
+    # Separate the profit and time from the results
+    profits, times = zip(*results)
+
+    # Calculate the average profit and average time
+    average_profit = np.mean(profits)
+    average_time = np.mean(times)
+
+    return average_profit, average_time
 
 
-if __name__ == "__main__":
-
+def optim_pccm():
     def f(trial):
         long_exp = trial.suggest_categorical(
             'long_expiration',
@@ -116,17 +104,20 @@ if __name__ == "__main__":
                 OExp.TWO_MONTHS,
             ])
 
+        short_delta = trial.suggest_int('short_delta', 10, 90) / 100.0
+        long_delta = trial.suggest_int('long_delta', 10, 90) / 100.0
         n = trial.suggest_int('N', 1, 12)
 
-        if n*short_exp.value >= long_exp.value:
+        if (n*short_exp.value >= long_exp.value) or (long_delta <= short_delta):
             return -np.inf
 
-        pnl, dt = PCCM_n_short_against_one_long_profit(n, long_exp, short_exp)
+        pnl, dt = PCCM_n_short_against_one_long_profit(
+            n, long_delta, long_exp, short_delta, short_exp)
 
         return round(pnl/dt, 2)
 
     study = optuna.create_study(direction='maximize')
-    study.optimize(f, n_trials=10000)
+    study.optimize(f, n_trials=1000)
 
     print()
 
@@ -136,3 +127,6 @@ if __name__ == "__main__":
     print("\nBest Parameters:")
     for param, value in study.best_params.items():
         print(f"{param.capitalize()}: {value}")
+
+if __name__ == "__main__":
+    optim_pccm()
