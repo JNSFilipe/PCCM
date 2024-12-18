@@ -1,5 +1,6 @@
 from enum import Enum, auto
 
+
 class OExp(Enum):
     ONE_WEEK = 1/52  # 1 week (in years)
     TWO_WEEKS = 2/52  # 2 weeks (in years)
@@ -20,5 +21,3 @@ class OExp(Enum):
 class OT(Enum):
     CALL = auto()
     PUT = auto()
-
-
