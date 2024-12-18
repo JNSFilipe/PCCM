@@ -28,7 +28,7 @@ def _(mo):
 @app.cell
 def _():
     N_SIMS = 1000
-    N_TRAILS = 500
+    N_TRAILS = 200
     return N_SIMS, N_TRAILS
 
 
@@ -149,8 +149,11 @@ def _(INTEREST_RATE, OExp, OM, VOLATILITY, p):
 
 
 @app.cell
-def _():
-    return
+def _(pnls):
+    from PCCM.utils import prob_of_profit
+
+    prob_of_profit(pnls)
+    return (prob_of_profit,)
 
 
 if __name__ == "__main__":
