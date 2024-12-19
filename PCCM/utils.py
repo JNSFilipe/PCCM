@@ -25,6 +25,6 @@ class OT(Enum):
 
 def prob_of_profit(pnls):
 
-    p = [1 if sum(x) > 0 else 0 for x in pnls]
+    p = [1 if x > 0 else 0 for x in pnls]
 
     return sum(p) / len(p)

@@ -81,7 +81,7 @@ def _(
     from PCCM.OptimGenericPCCM import optim_pccm
 
     optim_pccm(UNDERLYING_PRICE, INTEREST_RATE,
-               VOLATILITY, RM, OM, N_SIMS, N_TRAILS)
+               VOLATILITY, RM, OM, True, N_SIMS, N_TRAILS)
     return (optim_pccm,)
 
 
@@ -112,10 +112,12 @@ def _(mo):
 @app.cell
 def _(GaussianProcess):
     from PCCM.utils import OExp
+    from PCCM.PriceModels import StudentTProcess
 
+    #m = StudentTProcess(100, 0.3, 2, 0.05)
     m = GaussianProcess(100, 0.3, 0.05)
     p = [m.simulate(OExp.ONE_YEAR.value, weekends=True) for _ in range(100)]
-    return OExp, m, p
+    return OExp, StudentTProcess, m, p
 
 
 @app.cell
@@ -141,7 +143,7 @@ def _(INTEREST_RATE, OExp, OM, VOLATILITY, p):
 
     pnls = []
     for t in p:
-        pnl = pccm.simulate(t, INTEREST_RATE, VOLATILITY, 7, 0.9, OExp.TWO_MONTHS, 0.2, OExp.ONE_WEEK)
+        pnl = pccm.simulate(t, INTEREST_RATE, VOLATILITY, 8, 0.9, OExp.TWO_MONTHS, 0.5, OExp.ONE_WEEK)
         pnls.append(pnl)
 
     pprint([sum(i) for i in pnls])
@@ -152,8 +154,13 @@ def _(INTEREST_RATE, OExp, OM, VOLATILITY, p):
 def _(pnls):
     from PCCM.utils import prob_of_profit
 
-    prob_of_profit(pnls)
+    prob_of_profit([sum(i) for i in pnls])
     return (prob_of_profit,)
+
+
+@app.cell
+def _():
+    return
 
 
 if __name__ == "__main__":

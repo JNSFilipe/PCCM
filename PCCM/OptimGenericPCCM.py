@@ -1,6 +1,6 @@
 import optuna
 import numpy as np
-from PCCM.utils import OExp
+from PCCM.utils import OExp, prob_of_profit
 from PCCM.Strategies import PCCM
 from joblib import Parallel, delayed
 
@@ -16,6 +16,7 @@ def PCCM_n_short_against_one_long_profit(
         short_expiration,
         returns_model,
         option_model,
+        prob_metric=True,
         N=500):
 
     # Create a PCCM object
@@ -27,7 +28,10 @@ def PCCM_n_short_against_one_long_profit(
         pnl = pccm.simulate(price, r, sigma, n, long_delta,
                             long_expiration, short_delta, short_expiration)
 
-        m = sum(pnl) / ((len(pnl)-1)*short_expiration.value)
+        if prob_metric:
+            m = sum(pnl)
+        else:
+            m = sum(pnl) / ((len(pnl)-1)*short_expiration.value)
         return m
 
     # Use joblib's Parallel to run simulations in parallel
@@ -35,13 +39,17 @@ def PCCM_n_short_against_one_long_profit(
                                   for _ in range(N))
     # profits = single_simulation()
 
+    if prob_metric:
+        pp = prob_of_profit(profits)
+        return 100*pp
+
     # Calculate the average profit and average time
     average_profit = np.mean(profits)
 
     return average_profit
 
 
-def optim_pccm(S, r, sigma, returns_model, option_model, n_sims=500, n_trails=1000):
+def optim_pccm(S, r, sigma, returns_model, option_model, prob_metric=True, n_sims=500, n_trails=1000):
     def f(trial):
         long_exp = trial.suggest_categorical(
             'long_expiration',
@@ -79,7 +87,7 @@ def optim_pccm(S, r, sigma, returns_model, option_model, n_sims=500, n_trails=10
                                                    long_delta, long_exp,
                                                    short_delta, short_exp,
                                                    returns_model, option_model,
-                                                   N=n_sims)
+                                                   prob_metric=prob_metric, N=n_sims)
 
         return round(pnl, 2)
 
