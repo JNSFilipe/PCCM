@@ -79,9 +79,9 @@ def create_sequences_and_labels(df, normalized_df, sequence_length=252):
             next_adj_close = df.loc[next_friday, 'Close']
             # label = 1 if next_adj_close > current_adj_close else 0
             # label = 1 if current_adj_close*1.05 < next_adj_close else 0
-            label = 1 if current_adj_close*0.95 > next_adj_close else 0
-            # label = 1 if current_adj_close * \
-            #     0.95 > next_adj_close and current_adj_close*1.05 < next_adj_close else 0
+            # label = 1 if current_adj_close*0.95 > next_adj_close else 0
+            label = 1 if next_adj_close < current_adj_close * \
+                1.05 and next_adj_close > current_adj_close*0.95 else 0
 
             # Store sequence, label, and date
             sequences.append(
