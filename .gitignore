@@ -1,3 +1,7 @@
+# data files
+data/
+ml_data/
+
 # uv
 uv.lock
 .python-version

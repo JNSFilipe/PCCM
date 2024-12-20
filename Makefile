@@ -4,3 +4,9 @@ generic_pmcc:
 
 generic_pmcc_notebook:
 	uv run -- marimo edit ./notebooks/generic_pmcc.py
+
+get_data:
+	uv run ./ml/get_data.py
+
+train_mdl:
+	uv run ./ml/train.py
