@@ -5,12 +5,9 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import os
 from sklearn.model_selection import train_test_split
-from datetime import datetime
-from pathlib import Path
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import torchmetrics as tm
-from enum import Enum, auto
 from tqdm import tqdm
 
 
@@ -36,7 +33,9 @@ class StockPriceCNN(nn.Module):
         # Input shape: [batch_size, channels=5, sequence_length=252]
         self.cnn_layers = nn.Sequential(
             # First CNN block
-            nn.Conv1d(in_channels=5, out_channels=32,
+            # nn.Conv1d(in_channels=5, out_channels=32,
+            #           kernel_size=7, padding=3),
+            nn.Conv1d(in_channels=21, out_channels=32,
                       kernel_size=7, padding=3),
             nn.BatchNorm1d(32),
             nn.ReLU(),
@@ -81,269 +80,269 @@ class StockPriceCNN(nn.Module):
         return x
 
 
-class Reporter:
-    def __init__(self, base_path, model, optim, lr, device="cpu"):
-        self.train_losses = []
-        self.train_accuracies = []
-        self.val_losses = []
-        self.val_accuracies = []
-        self.epochs = []
+def load_and_balance_data(data_dir):
+    """Load and combine data from all tickers, ensuring balanced classes."""
+    all_sequences = []
+    all_labels = []
 
-        # Initialize metrics
-        self.accuracy = tm.classification.Accuracy(task="binary").to(device)
-        self.precision = tm.classification.Precision(task="binary").to(device)
-        self.recall = tm.classification.Recall(task="binary").to(device)
-        self.f1 = tm.classification.F1Score(task="binary").to(device)
+    # Load all data
+    for filename in os.listdir(data_dir):
+        if filename.endswith('_sequences.npy'):
+            ticker = filename.replace('_sequences.npy', '')
 
-        # Create unique path for this run
-        cname = type(model).__name__
-        oname = type(optim).__name__
-        self.path = f"{
-            base_path}/train_{cname}_{oname}_{lr}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        Path(self.path).mkdir(parents=True, exist_ok=True)
+            sequences = np.load(os.path.join(
+                data_dir, f'{ticker}_sequences.npy'))
+            labels = np.load(os.path.join(data_dir, f'{ticker}_labels.npy'))
 
-        # Initialize the plot
-        self.fig = make_subplots(
-            rows=1, cols=2,
-            subplot_titles=('Model Loss', 'Model Accuracy'),
-            horizontal_spacing=0.15
-        )
+            all_sequences.append(sequences)
+            all_labels.append(labels)
 
-        # Add traces that we'll update
-        self.fig.add_trace(go.Scatter(
-            name="Train Loss", mode='lines'), row=1, col=1)
-        self.fig.add_trace(go.Scatter(
-            name="Val Loss", mode='lines'), row=1, col=1)
-        self.fig.add_trace(go.Scatter(
-            name="Train Accuracy", mode='lines'), row=1, col=2)
-        self.fig.add_trace(go.Scatter(
-            name="Val Accuracy", mode='lines'), row=1, col=2)
+    # Combine all data
+    X = np.concatenate(all_sequences)
+    y = np.concatenate(all_labels)
 
-        # Update layout
-        self.fig.update_layout(
-            height=500,
-            width=1200,
-            showlegend=True,
-            title_text="Training Progress",
-            title_x=0.5,
-            template="plotly_white"
-        )
+    # Get indices for each class
+    up_indices = np.where(y == 1)[0]
+    down_indices = np.where(y == 0)[0]
 
-        # Update axes
-        self.fig.update_xaxes(title_text="Epoch", row=1, col=1)
-        self.fig.update_xaxes(title_text="Epoch", row=1, col=2)
-        self.fig.update_yaxes(title_text="Loss", row=1, col=1)
-        self.fig.update_yaxes(title_text="Accuracy", row=1, col=2)
+    # Find minimum class size
+    min_class_size = min(len(up_indices), len(down_indices))
 
-    def update(self, epoch, train_loss, train_acc, val_loss, val_acc):
-        self.epochs.append(epoch)
-        self.train_losses.append(train_loss)
-        self.train_accuracies.append(train_acc)
-        self.val_losses.append(val_loss)
-        self.val_accuracies.append(val_acc)
+    # Randomly sample from larger class to match smaller class
+    if len(up_indices) > min_class_size:
+        up_indices = np.random.choice(
+            up_indices, min_class_size, replace=False)
+    if len(down_indices) > min_class_size:
+        down_indices = np.random.choice(
+            down_indices, min_class_size, replace=False)
 
-        # Update the plot
-        self.fig.data[0].x = self.epochs
-        self.fig.data[0].y = self.train_losses
-        self.fig.data[1].x = self.epochs
-        self.fig.data[1].y = self.val_losses
-        self.fig.data[2].x = self.epochs
-        self.fig.data[2].y = self.train_accuracies
-        self.fig.data[3].x = self.epochs
-        self.fig.data[3].y = self.val_accuracies
+    # Combine balanced indices
+    balanced_indices = np.concatenate([up_indices, down_indices])
+    np.random.shuffle(balanced_indices)
 
-        # Save the plot
-        self.fig.write_html(f"{self.path}/training_progress.html")
-
-    def save_model(self, model, is_best=False):
-        path = f"{self.path}/checkpoints/"
-        Path(path).mkdir(parents=True, exist_ok=True)
-        if is_best:
-            torch.save(model.state_dict(), f"{path}/best_model.pth")
-        else:
-            torch.save(model.state_dict(), f"{path}/latest_model.pth")
-
-    def compute_metrics(self, y_pred, y_true):
-        accuracy = self.accuracy(y_pred, y_true)
-        precision = self.precision(y_pred, y_true)
-        recall = self.recall(y_pred, y_true)
-        f1 = self.f1(y_pred, y_true)
-        return accuracy, precision, recall, f1
+    # Return balanced dataset
+    return X[balanced_indices], y[balanced_indices]
 
 
-class StockPredictor:
-    def __init__(self):
-        # Training parameters
-        self.num_epochs = 100
-        self.batch_size = 32
-        self.lr = 0.001
-        self.device = torch.device(
-            'cuda' if torch.cuda.is_available() else 'cpu')
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device):
+    """Train the model and return training history."""
+    history = {
+        'train_loss': [], 'train_acc': [],
+        'val_loss': [], 'val_acc': []
+    }
 
-        # Initialize model, optimizer, and loss
-        self.model = StockPriceCNN().to(self.device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        self.criterion = nn.CrossEntropyLoss()
-        self.lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=5, verbose=True
-        )
+    best_val_acc = 0
 
-        # Initialize reporter
-        self.reporter = Reporter(
-            "stock_prediction", self.model, self.optimizer, self.lr, self.device
-        )
+    for epoch in range(num_epochs):
+        # Training phase
+        model.train()
+        train_losses = []
+        train_preds = []
+        train_true = []
 
-        self.best_val_loss = float('inf')
+        for sequences, labels in tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}'):
+            sequences, labels = sequences.to(device), labels.to(device)
 
-    def load_and_balance_data(self, data_dir):
-        """Load and combine data from all tickers, ensuring balanced classes."""
-        all_sequences = []
-        all_labels = []
-
-        # Load all data
-        for filename in os.listdir(data_dir):
-            if filename.endswith('_sequences.npy'):
-                ticker = filename.replace('_sequences.npy', '')
-                sequences = np.load(os.path.join(
-                    data_dir, f'{ticker}_sequences.npy'))
-                labels = np.load(os.path.join(
-                    data_dir, f'{ticker}_labels.npy'))
-                all_sequences.append(sequences)
-                all_labels.append(labels)
-
-        # Combine all data
-        X = np.concatenate(all_sequences)
-        y = np.concatenate(all_labels)
-
-        # Balance classes
-        up_indices = np.where(y == 1)[0]
-        down_indices = np.where(y == 0)[0]
-        min_class_size = min(len(up_indices), len(down_indices))
-
-        if len(up_indices) > min_class_size:
-            up_indices = np.random.choice(
-                up_indices, min_class_size, replace=False)
-        if len(down_indices) > min_class_size:
-            down_indices = np.random.choice(
-                down_indices, min_class_size, replace=False)
-
-        balanced_indices = np.concatenate([up_indices, down_indices])
-        np.random.shuffle(balanced_indices)
-
-        return X[balanced_indices], y[balanced_indices]
-
-    def initialize_dataloaders(self, sequences, labels):
-        # Split data
-        X_train, X_val, y_train, y_val = train_test_split(
-            sequences, labels, test_size=0.2, random_state=42, stratify=labels
-        )
-
-        # Create datasets
-        train_dataset = StockDataset(X_train, y_train)
-        val_dataset = StockDataset(X_val, y_val)
-
-        # Create dataloaders
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            pin_memory=(self.device == "cuda"),
-            num_workers=4
-        )
-
-        self.val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            pin_memory=(self.device == "cuda"),
-            num_workers=4
-        )
-
-    def train_epoch(self):
-        self.model.train()
-        total_loss = 0
-        predictions = []
-        targets = []
-
-        for batch_idx, (data, target) in enumerate(tqdm(self.train_loader, desc="Training")):
-            data, target = data.to(self.device), target.to(self.device)
-
-            self.optimizer.zero_grad()
-            output = self.model(data)
-            loss = self.criterion(output, target)
+            optimizer.zero_grad()
+            outputs = model(sequences)
+            loss = criterion(outputs, labels)
 
             loss.backward()
-            self.optimizer.step()
+            optimizer.step()
 
-            total_loss += loss.item()
-            predictions.extend(output.argmax(dim=1).cpu())
-            targets.extend(target.cpu())
+            train_losses.append(loss.item())
+            _, predicted = torch.max(outputs.data, 1)
+            train_preds.extend(predicted.cpu().numpy())
+            train_true.extend(labels.cpu().numpy())
 
-        avg_loss = total_loss / len(self.train_loader)
-        accuracy, _, _, _ = self.reporter.compute_metrics(
-            torch.tensor(predictions), torch.tensor(targets)
-        )
-
-        return avg_loss, accuracy.item()
-
-    def validate_epoch(self):
-        self.model.eval()
-        total_loss = 0
-        predictions = []
-        targets = []
+        # Validation phase
+        model.eval()
+        val_losses = []
+        val_preds = []
+        val_true = []
 
         with torch.no_grad():
-            for data, target in tqdm(self.val_loader, desc="Validating"):
-                data, target = data.to(self.device), target.to(self.device)
-                output = self.model(data)
-                loss = self.criterion(output, target)
+            for sequences, labels in val_loader:
+                sequences, labels = sequences.to(device), labels.to(device)
+                outputs = model(sequences)
+                loss = criterion(outputs, labels)
 
-                total_loss += loss.item()
-                predictions.extend(output.argmax(dim=1).cpu())
-                targets.extend(target.cpu())
+                val_losses.append(loss.item())
+                _, predicted = torch.max(outputs.data, 1)
+                val_preds.extend(predicted.cpu().numpy())
+                val_true.extend(labels.cpu().numpy())
 
-        avg_loss = total_loss / len(self.val_loader)
-        accuracy, precision, recall, f1 = self.reporter.compute_metrics(
-            torch.tensor(predictions), torch.tensor(targets)
-        )
+        # Calculate metrics
+        train_loss = np.mean(train_losses)
+        train_acc = accuracy_score(train_true, train_preds)
+        val_loss = np.mean(val_losses)
+        val_acc = accuracy_score(val_true, val_preds)
 
-        print(f"\nValidation Metrics:")
-        print(f"Accuracy: {accuracy:.4f}")
-        print(f"Precision: {precision:.4f}")
-        print(f"Recall: {recall:.4f}")
-        print(f"F1 Score: {f1:.4f}")
+        # Update learning rate scheduler
+        scheduler.step(val_loss)
 
-        return avg_loss, accuracy.item()
+        # Save metrics
+        history['train_loss'].append(train_loss)
+        history['train_acc'].append(train_acc)
+        history['val_loss'].append(val_loss)
+        history['val_acc'].append(val_acc)
 
-    def run(self):
-        print("Loading and preparing data...")
-        sequences, labels = self.load_and_balance_data('ml_data')
-        self.initialize_dataloaders(sequences, labels)
+        # Print progress
+        print(f'Epoch {epoch+1}/{num_epochs}:')
+        print(f'Learning Rate: {optimizer.param_groups[0]["lr"]:.4f}')
+        print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}')
+        print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}\n')
 
-        print(f"Starting training on {self.device}...")
-        for epoch in range(self.num_epochs):
-            print(f"\nEpoch {epoch+1}/{self.num_epochs}")
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), 'best_model.pth')
 
-            # Train and validate
-            train_loss, train_acc = self.train_epoch()
-            val_loss, val_acc = self.validate_epoch()
+    return history
 
-            # Update learning rate
-            self.lr_scheduler.step(val_loss)
 
-            # Update plots and save progress
-            self.reporter.update(
-                epoch, train_loss, train_acc, val_loss, val_acc)
+def plot_training_history(history):
+    """Plot training and validation metrics using Plotly."""
+    # Create figure with secondary y-axis
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=('Model Loss', 'Model Accuracy'),
+        horizontal_spacing=0.15
+    )
 
-            # Save model if it's the best so far
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                self.reporter.save_model(self.model, is_best=True)
+    # Add traces for loss
+    fig.add_trace(
+        go.Scatter(y=history['train_loss'], name="Train Loss",
+                   line=dict(color="blue")),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(y=history['val_loss'], name="Validation Loss",
+                   line=dict(color="red")),
+        row=1, col=1
+    )
 
-            # Also save latest model
-            self.reporter.save_model(self.model, is_best=False)
+    # Add traces for accuracy
+    fig.add_trace(
+        go.Scatter(y=history['train_acc'], name="Train Accuracy",
+                   line=dict(color="green")),
+        row=1, col=2
+    )
+    fig.add_trace(
+        go.Scatter(y=history['val_acc'], name="Validation Accuracy",
+                   line=dict(color="orange")),
+        row=1, col=2
+    )
+
+    # Update layout
+    fig.update_layout(
+        height=500,
+        width=1200,
+        showlegend=True,
+        title_text="Training History",
+        title_x=0.5,
+        template="plotly_white"
+    )
+
+    # Update x-axes
+    fig.update_xaxes(title_text="Epoch", row=1, col=1)
+    fig.update_xaxes(title_text="Epoch", row=1, col=2)
+
+    # Update y-axes
+    fig.update_yaxes(title_text="Loss", row=1, col=1)
+    fig.update_yaxes(title_text="Accuracy", row=1, col=2)
+
+    # Save as HTML file
+    fig.write_html("training_history.html")
+
+    # Optional: Also display in notebook if running in one
+    fig.show()
+
+
+def compute_class_weights(labels):
+    """Compute class weights for balanced training."""
+    class_counts = np.bincount(labels)
+    total_samples = len(labels)
+    class_weights = total_samples / (len(class_counts) * class_counts)
+    return torch.FloatTensor(class_weights)
+
+
+def main():
+    # Set random seeds for reproducibility
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    # Parameters
+    data_dir = 'ml_data'
+    # batch_size = 32
+    batch_size = 128
+    num_epochs = 50
+    learning_rate = 0.01
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Load balanced data
+    print("Loading and balancing data...")
+    sequences, labels = load_and_balance_data(data_dir)
+
+    # Compute class weights for balanced training
+    class_weights = compute_class_weights(labels).to(device)
+
+    # Split data
+    X_train, X_val, y_train, y_val = train_test_split(
+        sequences, labels, test_size=0.2, random_state=42, stratify=labels
+    )
+
+    # Create data loaders
+    train_dataset = StockDataset(X_train, y_train)
+    val_dataset = StockDataset(X_val, y_val)
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+
+    # Initialize model, loss, optimizer, and scheduler
+    model = StockPriceCNN().to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.1,
+        patience=5,
+        verbose=True,
+        min_lr=1e-6
+    )
+
+    # Train model
+    print("Starting training...")
+    history = train_model(model, train_loader, val_loader,
+                          criterion, optimizer, scheduler, num_epochs, device)
+
+    # Plot training history
+    plot_training_history(history)
+
+    # Load best model and evaluate on validation set
+    model.load_state_dict(torch.load('best_model.pth'))
+    model.eval()
+
+    val_preds = []
+    val_true = []
+
+    with torch.no_grad():
+        for sequences, labels in val_loader:
+            sequences = sequences.to(device)
+            outputs = model(sequences)
+            _, predicted = torch.max(outputs.data, 1)
+            val_preds.extend(predicted.cpu().numpy())
+            val_true.extend(labels.numpy())
+
+    # Print final metrics
+    print("\nFinal Validation Metrics:")
+    print(f"Accuracy: {accuracy_score(val_true, val_preds):.4f}")
+    print(f"Precision: {precision_score(val_true, val_preds):.4f}")
+    print(f"Recall: {recall_score(val_true, val_preds):.4f}")
+    print(f"F1 Score: {f1_score(val_true, val_preds):.4f}")
 
 
 if __name__ == "__main__":
-    predictor = StockPredictor()
-    predictor.run()
+    main()
