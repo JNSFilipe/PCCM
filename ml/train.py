@@ -5,7 +5,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import os
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from tqdm import tqdm
@@ -33,10 +33,10 @@ class StockPriceCNN(nn.Module):
         # Input shape: [batch_size, channels=5, sequence_length=252]
         self.cnn_layers = nn.Sequential(
             # First CNN block
-            # nn.Conv1d(in_channels=5, out_channels=32,
-            #           kernel_size=7, padding=3),
-            nn.Conv1d(in_channels=21, out_channels=32,
+            nn.Conv1d(in_channels=5, out_channels=32,
                       kernel_size=7, padding=3),
+            # nn.Conv1d(in_channels=21, out_channels=32,
+            #           kernel_size=7, padding=3),
             nn.BatchNorm1d(32),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=2),
@@ -189,7 +189,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
 
         # Print progress
         print(f'Epoch {epoch+1}/{num_epochs}:')
-        print(f'Learning Rate: {optimizer.param_groups[0]["lr"]:.4f}')
+        print(f'Learning Rate: {optimizer.param_groups[0]["lr"]:.7f}')
         print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}')
         print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}\n')
 
@@ -201,12 +201,14 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     return history
 
 
-def plot_training_history(history):
-    """Plot training and validation metrics using Plotly."""
-    # Create figure with secondary y-axis
+def plot_training_history(history, val_true, val_preds):
+    """Plot training and validation metrics using Plotly, including confusion matrix."""
+    # Create figure with three subplots (2 in first row, 1 in second row)
     fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=('Model Loss', 'Model Accuracy'),
+        rows=2, cols=2,
+        subplot_titles=('Model Loss', 'Model Accuracy', 'Confusion Matrix'),
+        specs=[[{}, {}], [{"colspan": 2}, None]],
+        vertical_spacing=0.15,
         horizontal_spacing=0.15
     )
 
@@ -234,12 +236,31 @@ def plot_training_history(history):
         row=1, col=2
     )
 
+    # Create confusion matrix
+    cm = confusion_matrix(val_true, val_preds, normalize="all") * 100
+    print(cm)
+
+    # Add confusion matrix heatmap
+    fig.add_trace(
+        go.Heatmap(
+            z=cm,
+            x=['Predicted 0', 'Predicted 1'],
+            y=['Actual 0', 'Actual 1'],
+            text=cm,
+            texttemplate="%{z}",
+            textfont={"size": 20},
+            colorscale='Blues',
+            showscale=False,
+        ),
+        row=2, col=1
+    )
+
     # Update layout
     fig.update_layout(
-        height=500,
+        height=900,
         width=1200,
         showlegend=True,
-        title_text="Training History",
+        title_text="Training History and Model Evaluation",
         title_x=0.5,
         template="plotly_white"
     )
@@ -276,7 +297,7 @@ def main():
     data_dir = 'ml_data'
     # batch_size = 32
     batch_size = 128
-    num_epochs = 50
+    num_epochs = 200
     learning_rate = 0.01
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -318,9 +339,6 @@ def main():
     history = train_model(model, train_loader, val_loader,
                           criterion, optimizer, scheduler, num_epochs, device)
 
-    # Plot training history
-    plot_training_history(history)
-
     # Load best model and evaluate on validation set
     model.load_state_dict(torch.load('best_model.pth'))
     model.eval()
@@ -335,6 +353,9 @@ def main():
             _, predicted = torch.max(outputs.data, 1)
             val_preds.extend(predicted.cpu().numpy())
             val_true.extend(labels.numpy())
+
+    # Plot training history
+    plot_training_history(history, val_true, val_preds)
 
     # Print final metrics
     print("\nFinal Validation Metrics:")
