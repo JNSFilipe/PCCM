@@ -1,9 +1,12 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime  # , timedelta
+from datetime import datetime
+from pathlib import Path
 import os
 from tqdm import tqdm
+import ta
+from cons import K, STgt
 
 
 def load_tickers(filename):
@@ -23,8 +26,74 @@ def download_stock_data(ticker, start_date, end_date):
         return None
 
 
+# def add_technical_indicators(df):
+#     """Add RSI, ATR, and Parabolic SAR indicators to the dataframe."""
+#     # RSI
+#     df['RSI'] = ta.momentum.RSIIndicator(df['Close']).rsi()
+#
+#     # ATR
+#     df['ATR'] = ta.volatility.AverageTrueRange(
+#         high=df['High'],
+#         low=df['Low'],
+#         close=df['Close']
+#     ).average_true_range()
+#
+#     # Parabolic SAR
+#     sar_indicator = ta.trend.PSARIndicator(
+#         high=df['High'],
+#         low=df['Low'],
+#         close=df['Close']
+#     )
+#     df['SAR'] = sar_indicator.psar()
+#     df['SAR_Up'] = sar_indicator.psar_up()
+#     df['SAR_Down'] = sar_indicator.psar_down()
+#
+#     return df
+
+
+def add_technical_indicators(df):
+    """Add trading signals based on technical indicators."""
+    # Moving Average signals
+    sma20 = ta.trend.SMAIndicator(df['Close'], window=20).sma_indicator()
+    sma50 = ta.trend.SMAIndicator(df['Close'], window=50).sma_indicator()
+    df['MA_Signal'] = np.where(
+        sma20 > sma50, 1, np.where(sma20 < sma50, -1, 0))
+
+    # MACD signals
+    macd = ta.trend.MACD(df['Close'])
+    df['MACD_Signal'] = np.where(macd.macd() > macd.macd_signal(), 1, -1)
+
+    # Bollinger Bands signals
+    bb = ta.volatility.BollingerBands(df['Close'])
+    df['BB_Signal'] = np.where(df['Close'] < bb.bollinger_lband(), 1,
+                               np.where(df['Close'] > bb.bollinger_hband(), -1, 0))
+
+    # RSI signals
+    rsi = ta.momentum.RSIIndicator(df['Close']).rsi()
+    df['RSI_Signal'] = np.where(rsi < 30, 1, np.where(rsi > 70, -1, 0))
+
+    # Parabolic SAR signals
+    sar_indicator = ta.trend.PSARIndicator(
+        high=df['High'],
+        low=df['Low'],
+        close=df['Close']
+    )
+    df['SAR_Signal'] = np.where(df['Close'] > sar_indicator.psar(), 1, -1)
+
+    # Ichimoku Cloud signals
+    ichimoku = ta.trend.IchimokuIndicator(df['High'], df['Low'])
+    span_a = ichimoku.ichimoku_a()
+    span_b = ichimoku.ichimoku_b()
+    df['Cloud_Signal'] = np.where(
+        (df['Close'] > span_a) & (df['Close'] > span_b), 1,
+        np.where((df['Close'] < span_a) & (df['Close'] < span_b), -1, 0)
+    )
+
+    return df
+
+
 def normalize_with_rolling_mean(df, window=52):
-    """Normalize OHLCV data by dividing by 52-week rolling mean."""
+    """Normalize OHLCV data and technical indicators by dividing by 52-week rolling mean."""
     # Convert window from weeks to business days
     window_days = window * 5
 
@@ -32,10 +101,28 @@ def normalize_with_rolling_mean(df, window=52):
     cols_to_normalize = ['Open', 'High', 'Low', 'Close', 'Volume']
     normalized_df = df.copy()
 
+    # Normalize OHLCV data
     for col in cols_to_normalize:
         rolling_mean = df[col].rolling(
             window=window_days, min_periods=1).mean()
         normalized_df[col] = df[col] / rolling_mean
+
+    # if K.INDICATORS:
+    #     # Normalize technical indicators
+    #     # RSI is already normalized (0-100), so we don't normalize it
+    #
+    #     # Normalize ATR
+    #     rolling_mean = df['ATR'].rolling(
+    #         window=window_days, min_periods=1).mean()
+    #     rolling_mean = rolling_mean.replace(0, np.nan)
+    #     normalized_df['ATR'] = df['ATR'] / rolling_mean
+    #     normalized_df['ATR'] = normalized_df['ATR'].fillna(0)
+    #
+    #     # Normalize SAR indicators relative to price
+    #     for col in ['SAR', 'SAR_Up', 'SAR_Down']:
+    #         # Normalize relative to price
+    #         normalized_df[col] = df[col] / df['Close']
+    #         normalized_df[col] = normalized_df[col].fillna(0)
 
     return normalized_df
 
@@ -45,7 +132,6 @@ def get_friday_dates(df):
     return df[df.index.dayofweek == 4].index
 
 
-# 252 trading days ≈ 1 year
 def create_sequences_and_labels(df, normalized_df, sequence_length=252):
     """Create sequences of daily data and corresponding labels for each Friday."""
     friday_dates = get_friday_dates(df)
@@ -59,7 +145,6 @@ def create_sequences_and_labels(df, normalized_df, sequence_length=252):
         next_friday = friday_dates[i + 1]
 
         # Get one year of daily data before current Friday
-        # Extra buffer for non-trading days
         sequence_start = current_friday - \
             pd.Timedelta(days=sequence_length * 1.5)
         sequence_end = current_friday
@@ -74,18 +159,29 @@ def create_sequences_and_labels(df, normalized_df, sequence_length=252):
             # Take the last 'sequence_length' days of data
             sequence_data = sequence_data.iloc[-sequence_length:]
 
-            # Create label using original Adj Close prices
-            current_adj_close = df.loc[current_friday, 'Close']
-            next_adj_close = df.loc[next_friday, 'Close']
-            # label = 1 if next_adj_close > current_adj_close else 0
-            # label = 1 if current_adj_close*1.05 < next_adj_close else 0
-            # label = 1 if current_adj_close*0.95 > next_adj_close else 0
-            label = 1 if next_adj_close < current_adj_close * \
-                1.05 and next_adj_close > current_adj_close*0.95 else 0
+            # Create label using original Close prices
+            current_close = df.loc[current_friday, 'Close']
+            next_close = df.loc[next_friday, 'Close']
+            match K.TARGET:
+                case STgt.UP:
+                    label = 1 if next_close > current_close * (1+K.PCT) else 0
+                case STgt.DWN:
+                    label = 1 if next_close < current_close * (1-K.PCT) else 0
+                case STgt.CONS:
+                    label = 1 if next_close < current_close * (1+K.PCT) \
+                        and next_close > current_close * (1-K.PCT) else 0
 
             # Store sequence, label, and date
-            sequences.append(
-                sequence_data[['Open', 'High', 'Low', 'Close', 'Volume']].values)
+            # Include normalized OHLCV data and technical indicators
+            if K.INDICATORS:
+                # sequences.append(sequence_data[['Open', 'High', 'Low', 'Close', 'Volume',
+                #                                 'RSI', 'ATR', 'SAR', 'SAR_Up', 'SAR_Down']].values)
+                sequences.append(sequence_data[['Open', 'High', 'Low', 'Close', 'Volume', 'MA_Signal',
+                                 'MACD_Signal', 'BB_Signal', 'RSI_Signal', 'SAR_Signal', 'Cloud_Signal']].values)
+            else:
+                sequences.append(
+                    sequence_data[['Open', 'High', 'Low', 'Close', 'Volume']].values)
+
             labels.append(label)
             dates.append(current_friday)
 
@@ -94,15 +190,18 @@ def create_sequences_and_labels(df, normalized_df, sequence_length=252):
 
 def main():
     # Parameters
-    start_date = '2010-01-01'  # Adjust as needed
+    start_date = '2010-01-01'
     end_date = datetime.now().strftime('%Y-%m-%d')
-    output_dir = 'ml_data'
+    output_dir = K.DATA_DIR
+
+    # Remove prior data
+    os.system(f'rm -rf {output_dir}')
 
     # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     # Load tickers
-    tickers = load_tickers('ml/tickers.txt')
+    tickers = load_tickers(K.TICKERS_DIR)
 
     # Process each ticker
     for ticker in tqdm(tickers):
@@ -112,6 +211,13 @@ def main():
         df = download_stock_data(ticker, start_date, end_date)
         if df is None or df.empty:
             continue
+
+        if K.INDICATORS:
+            # Add technical indicators
+            df = add_technical_indicators(df)
+
+            # Handle any NaN values that might have been introduced
+            df = df.fillna(method='ffill').fillna(method='bfill')
 
         # Normalize data
         normalized_df = normalize_with_rolling_mean(df)
@@ -130,6 +236,8 @@ def main():
             np.save(f'{output_dir}/{ticker}_dates.npy', date_strings)
 
             print(f"Saved {len(sequences)} sequences for {ticker}")
+            # This will show (n_samples, sequence_length, n_features)
+            print(f"Data shape: {sequences.shape}")
 
 
 if __name__ == "__main__":

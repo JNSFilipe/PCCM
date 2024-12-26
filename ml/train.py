@@ -3,12 +3,15 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+from collections import Counter
 import os
+from models import StockPriceCNN, StockPriceIndicatorsCNN
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from tqdm import tqdm
+from cons import K
 
 
 class StockDataset(Dataset):
@@ -26,62 +29,16 @@ class StockDataset(Dataset):
         return self.sequences[idx], self.labels[idx]
 
 
-class StockPriceCNN(nn.Module):
-    def __init__(self):
-        super(StockPriceCNN, self).__init__()
-
-        # Input shape: [batch_size, channels=5, sequence_length=252]
-        self.cnn_layers = nn.Sequential(
-            # First CNN block
-            nn.Conv1d(in_channels=5, out_channels=32,
-                      kernel_size=7, padding=3),
-            # nn.Conv1d(in_channels=21, out_channels=32,
-            #           kernel_size=7, padding=3),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2),
-            nn.Dropout(0.2),
-
-            # Second CNN block
-            nn.Conv1d(in_channels=32, out_channels=64,
-                      kernel_size=5, padding=2),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2),
-            nn.Dropout(0.2),
-
-            # Third CNN block
-            nn.Conv1d(in_channels=64, out_channels=128,
-                      kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2),
-            nn.Dropout(0.2)
-        )
-
-        # Calculate the size of flattened features
-        # Divided by 8 due to 3 max pooling layers
-        self.feature_size = 128 * (252 // (2 * 2 * 2))
-
-        self.fc_layers = nn.Sequential(
-            nn.Linear(self.feature_size, 128),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(64, 2)  # Binary classification
-        )
-
-    def forward(self, x):
-        x = self.cnn_layers(x)
-        x = x.view(-1, self.feature_size)
-        x = self.fc_layers(x)
-        return x
-
-
 def load_and_balance_data(data_dir):
-    """Load and combine data from all tickers, ensuring balanced classes."""
+    """
+    Load and combine data from all tickers, ensuring balanced classes across multiple classes.
+
+    Args:
+        data_dir (str): Directory containing the sequence and label files
+
+    Returns:
+        tuple: (X, y) containing balanced features and labels
+    """
     all_sequences = []
     all_labels = []
 
@@ -89,11 +46,9 @@ def load_and_balance_data(data_dir):
     for filename in os.listdir(data_dir):
         if filename.endswith('_sequences.npy'):
             ticker = filename.replace('_sequences.npy', '')
-
             sequences = np.load(os.path.join(
                 data_dir, f'{ticker}_sequences.npy'))
             labels = np.load(os.path.join(data_dir, f'{ticker}_labels.npy'))
-
             all_sequences.append(sequences)
             all_labels.append(labels)
 
@@ -101,24 +56,30 @@ def load_and_balance_data(data_dir):
     X = np.concatenate(all_sequences)
     y = np.concatenate(all_labels)
 
-    # Get indices for each class
-    up_indices = np.where(y == 1)[0]
-    down_indices = np.where(y == 0)[0]
+    # Get unique classes and their counts
+    unique_classes = np.unique(y)
+    class_indices = {cls: np.where(y == cls)[0] for cls in unique_classes}
 
     # Find minimum class size
-    min_class_size = min(len(up_indices), len(down_indices))
+    min_class_size = min(len(indices) for indices in class_indices.values())
 
-    # Randomly sample from larger class to match smaller class
-    if len(up_indices) > min_class_size:
-        up_indices = np.random.choice(
-            up_indices, min_class_size, replace=False)
-    if len(down_indices) > min_class_size:
-        down_indices = np.random.choice(
-            down_indices, min_class_size, replace=False)
+    # Balance all classes to match the smallest class size
+    balanced_indices = []
+    for cls in unique_classes:
+        indices = class_indices[cls]
+        if len(indices) > min_class_size:
+            indices = np.random.choice(indices, min_class_size, replace=False)
+        balanced_indices.append(indices)
 
-    # Combine balanced indices
-    balanced_indices = np.concatenate([up_indices, down_indices])
+    # Combine and shuffle balanced indices
+    balanced_indices = np.concatenate(balanced_indices)
     np.random.shuffle(balanced_indices)
+
+    # Print class distribution information
+    original_distribution = Counter(y)
+    balanced_distribution = Counter(y[balanced_indices])
+    print("Original class distribution:", dict(original_distribution))
+    print("Balanced class distribution:", dict(balanced_distribution))
 
     # Return balanced dataset
     return X[balanced_indices], y[balanced_indices]
@@ -196,18 +157,23 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         # Save best model
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            torch.save(model.state_dict(), 'best_model.pth')
+            torch.save(model.state_dict(), K.MDL_DIR)
+
+        # Early stopping (stop if lr < K.MIN_LR*10)
+        if optimizer.param_groups[0]['lr'] < K.MIN_LR*10:
+            print(f"Early stopping due to lr < {K.MIN_LR*10}")
+            break
 
     return history
 
 
-def plot_training_history(history, val_true, val_preds):
-    """Plot training and validation metrics using Plotly, including confusion matrix."""
-    # Create figure with three subplots (2 in first row, 1 in second row)
+def plot_training_history(history, val_true, val_probs):
+    """Plot training and validation metrics using Plotly, including confusion matrix and precision-threshold curve."""
+    # Create figure with four subplots (2x2 grid)
     fig = make_subplots(
         rows=2, cols=2,
-        subplot_titles=('Model Loss', 'Model Accuracy', 'Confusion Matrix'),
-        specs=[[{}, {}], [{"colspan": 2}, None]],
+        subplot_titles=('Model Loss', 'Model Accuracy',
+                        'Confusion Matrix', 'Precision vs Threshold'),
         vertical_spacing=0.15,
         horizontal_spacing=0.15
     )
@@ -237,22 +203,46 @@ def plot_training_history(history, val_true, val_preds):
     )
 
     # Create confusion matrix
-    cm = confusion_matrix(val_true, val_preds, normalize="all") * 100
-    print(cm)
+    cm = confusion_matrix(
+        val_true, (val_probs >= 0.5).astype(int), normalize="all") * 100
 
     # Add confusion matrix heatmap
     fig.add_trace(
         go.Heatmap(
             z=cm,
-            x=['Predicted 0', 'Predicted 1'],
-            y=['Actual 0', 'Actual 1'],
+            x=[f"Predicted {i}" for i in list(set(val_true))],
+            y=[f"Actual {i}" for i in list(set(val_true))],
             text=cm,
-            texttemplate="%{z}",
-            textfont={"size": 20},
+            texttemplate="%{z:.1f}%",
+            textfont={"size": 12},
             colorscale='Blues',
             showscale=False,
         ),
         row=2, col=1
+    )
+
+    # Calculate precision for different thresholds
+    thresholds = np.arange(0.5, 0.95, 0.05)
+    precisions = []
+
+    for threshold in thresholds:
+        predictions = (val_probs >= threshold).astype(int)
+        if sum(predictions) > 0:  # Only calculate precision if we have positive predictions
+            prec = precision_score(val_true, predictions, zero_division=0)
+        else:
+            prec = 0
+        precisions.append(prec)
+
+    # Add precision vs threshold plot
+    fig.add_trace(
+        go.Scatter(
+            x=thresholds * 100,  # Convert to percentage
+            y=precisions,
+            name="Precision",
+            line=dict(color="purple"),
+            mode='lines+markers'
+        ),
+        row=2, col=2
     )
 
     # Update layout
@@ -268,13 +258,15 @@ def plot_training_history(history, val_true, val_preds):
     # Update x-axes
     fig.update_xaxes(title_text="Epoch", row=1, col=1)
     fig.update_xaxes(title_text="Epoch", row=1, col=2)
+    fig.update_xaxes(title_text="Threshold (%)", row=2, col=2)
 
     # Update y-axes
     fig.update_yaxes(title_text="Loss", row=1, col=1)
     fig.update_yaxes(title_text="Accuracy", row=1, col=2)
+    fig.update_yaxes(title_text="Precision", row=2, col=2)
 
     # Save as HTML file
-    fig.write_html("training_history.html")
+    fig.write_html(K.RPRT_DIR)
 
     # Optional: Also display in notebook if running in one
     fig.show()
@@ -290,15 +282,14 @@ def compute_class_weights(labels):
 
 def main():
     # Set random seeds for reproducibility
-    torch.manual_seed(42)
-    np.random.seed(42)
+    torch.manual_seed(K.RANDOM)
+    np.random.seed(K.RANDOM)
 
     # Parameters
-    data_dir = 'ml_data'
-    # batch_size = 32
-    batch_size = 128
-    num_epochs = 200
-    learning_rate = 0.01
+    data_dir = K.DATA_DIR
+    batch_size = K.BATCH_SIZE
+    num_epochs = K.EPOCHS
+    learning_rate = K.LEARNING_RATE
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Load balanced data
@@ -310,8 +301,7 @@ def main():
 
     # Split data
     X_train, X_val, y_train, y_val = train_test_split(
-        sequences, labels, test_size=0.2, random_state=42, stratify=labels
-    )
+        sequences, labels, test_size=K.VALIDATION_SPLIT, random_state=K.RANDOM, stratify=labels)
 
     # Create data loaders
     train_dataset = StockDataset(X_train, y_train)
@@ -322,16 +312,20 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
     # Initialize model, loss, optimizer, and scheduler
-    model = StockPriceCNN().to(device)
+    model = None
+    if not K.INDICATORS:
+        model = StockPriceCNN().to(device)
+    else:
+        model = StockPriceIndicatorsCNN().to(device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min',
         factor=0.1,
-        patience=5,
+        patience=K.PATIENCE,
         verbose=True,
-        min_lr=1e-6
+        min_lr=K.MIN_LR
     )
 
     # Train model
@@ -340,22 +334,29 @@ def main():
                           criterion, optimizer, scheduler, num_epochs, device)
 
     # Load best model and evaluate on validation set
-    model.load_state_dict(torch.load('best_model.pth'))
+    model.load_state_dict(torch.load(K.MDL_DIR))
     model.eval()
 
-    val_preds = []
+    # val_preds = []
+    val_probs = []
     val_true = []
 
     with torch.no_grad():
         for sequences, labels in val_loader:
             sequences = sequences.to(device)
             outputs = model(sequences)
-            _, predicted = torch.max(outputs.data, 1)
-            val_preds.extend(predicted.cpu().numpy())
+            # Probability of positive class
+            probabilities = torch.softmax(outputs, dim=1)[:, 1]
+            val_probs.extend(probabilities.cpu().numpy())
             val_true.extend(labels.numpy())
 
+    val_probs = np.array(val_probs)
+    val_true = np.array(val_true)
+
     # Plot training history
-    plot_training_history(history, val_true, val_preds)
+    plot_training_history(history, val_true, val_probs)
+
+    val_preds = (val_probs >= 0.5).astype(int)
 
     # Print final metrics
     print("\nFinal Validation Metrics:")

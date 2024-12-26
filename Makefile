@@ -10,3 +10,6 @@ get_data:
 
 train_mdl:
 	uv run ./ml/train.py
+
+predict_mdl:
+	uv run ./ml/predict.py
