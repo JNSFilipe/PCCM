@@ -89,6 +89,44 @@ def add_technical_indicators(df):
         np.where((df['Close'] < span_a) & (df['Close'] < span_b), -1, 0)
     )
 
+    # New indicators (https://arxiv.org/pdf/2310.09903)
+
+    # 1. Squeeze Pro Signal
+    # Using Bollinger Bands and Keltner Channels for squeeze detection
+    bb = ta.volatility.BollingerBands(df['Close'])
+    bb_width = bb.bollinger_hband() - bb.bollinger_lband()
+
+    kc = ta.volatility.KeltnerChannel(
+        high=df['High'], low=df['Low'], close=df['Close'])
+    kc_width = kc.keltner_channel_hband() - kc.keltner_channel_lband()
+
+    # Squeeze is on when Bollinger Bands are inside Keltner Channel
+    df['Squeeze_Signal'] = np.where(bb_width < kc_width,
+                                    np.where(df['Close'] > bb.bollinger_hband(), 1,
+                                             np.where(df['Close'] < bb.bollinger_lband(), -1, 0)),
+                                    0)
+
+    # 2. Thermo Signal (using momentum indicators)
+    roc = ta.momentum.ROCIndicator(df['Close'], window=10).roc()
+    mfi = ta.volume.MFIIndicator(high=df['High'], low=df['Low'],
+                                 close=df['Close'], volume=df['Volume']).money_flow_index()
+
+    df['Thermo_Signal'] = np.where((roc > 0) & (mfi > 80), 1,
+                                   np.where((roc < 0) & (mfi < 20), -1, 0))
+
+    # 3. PPO (Percentage Price Oscillator) Signal
+    ppo = ta.momentum.PercentagePriceOscillator(df['Close'])
+    df['PPO_Signal'] = np.where(ppo.ppo() > ppo.ppo_signal(), 1, -1)
+
+    # 4. Decay Signal (using exponential decay of price movements)
+    ema_short = ta.trend.EMAIndicator(df['Close'], window=5).ema_indicator()
+    ema_long = ta.trend.EMAIndicator(df['Close'], window=20).ema_indicator()
+    price_decay = (df['Close'] - ema_short) / (ema_long - ema_short)
+
+    df['Decay_Signal'] = np.where(price_decay > 0.8, -1,  # Overbought
+                                  # Oversold
+                                  np.where(price_decay < 0.2, 1, 0))
+
     return df
 
 
@@ -174,10 +212,11 @@ def create_sequences_and_labels(df, normalized_df, sequence_length=252):
             # Store sequence, label, and date
             # Include normalized OHLCV data and technical indicators
             if K.INDICATORS:
-                # sequences.append(sequence_data[['Open', 'High', 'Low', 'Close', 'Volume',
-                #                                 'RSI', 'ATR', 'SAR', 'SAR_Up', 'SAR_Down']].values)
-                sequences.append(sequence_data[['Open', 'High', 'Low', 'Close', 'Volume', 'MA_Signal',
-                                 'MACD_Signal', 'BB_Signal', 'RSI_Signal', 'SAR_Signal', 'Cloud_Signal']].values)
+                sequences.append(sequence_data[['Open', 'High', 'Low', 'Close', 'Volume',
+                                                'MA_Signal', 'MACD_Signal', 'BB_Signal',
+                                                'RSI_Signal', 'SAR_Signal', 'Cloud_Signal',
+                                                'Squeeze_Signal', 'Thermo_Signal',
+                                                'PPO_Signal', 'Decay_Signal']].values)
             else:
                 sequences.append(
                     sequence_data[['Open', 'High', 'Low', 'Close', 'Volume']].values)
