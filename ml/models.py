@@ -22,7 +22,7 @@ class StockPriceIndicatorsCNN(nn.Module):
 
         self.tech_ind_conv = nn.Sequential(
             # Process technical indicators (4 channels)
-            nn.Conv1d(in_channels=6, out_channels=16,
+            nn.Conv1d(in_channels=10, out_channels=16,
                       kernel_size=7, padding=3),
             nn.BatchNorm1d(16),
             nn.ReLU(),

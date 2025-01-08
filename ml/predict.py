@@ -6,9 +6,15 @@ from get_data import (
     normalize_with_rolling_mean,
     add_technical_indicators
 )
-from models import StockPriceCNN
+from models import StockPriceCNN, StockPriceIndicatorsCNN
 from colorama import init, Fore, Style
 from cons import K
+import warnings
+
+# Disable warnings
+warnings.warn("FIX: As a temporary measure, warnings will be ignored.")
+warnings.filterwarnings("ignore")
+
 
 # Initialize colorama
 init()
@@ -49,7 +55,12 @@ def prepare_sequence(df, normalized_df, sequence_length=252):
     sequence_data = normalized_df.iloc[-sequence_length:]
 
     # Prepare the sequence in the correct format
-    sequence = sequence_data[['Open', 'High', 'Low', 'Close', 'Volume']].values
+    if K.INDICATORS:
+        sequence = sequence_data[['Open', 'High', 'Low', 'Close', 'Volume', 'MA_Signal',
+                                  'MACD_Signal', 'BB_Signal', 'RSI_Signal', 'SAR_Signal', 'Cloud_Signal']].values
+    else:
+        sequence = sequence_data[['Open', 'High',
+                                  'Low', 'Close', 'Volume']].values
 
     # Add batch and channel dimensions
     sequence = torch.FloatTensor(sequence).unsqueeze(0)  # Add batch dimension
@@ -88,8 +99,13 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Load the trained model
-    model = StockPriceCNN().to(device)
-    model.load_state_dict(torch.load(K.MDL_DIR, map_location=device))
+    model = None
+    if not K.INDICATORS:
+        model = StockPriceCNN().to(device)
+    else:
+        model = StockPriceIndicatorsCNN().to(device)
+    model.load_state_dict(torch.load(
+        K.MDL_DIR, map_location=device, weights_only=True))
     model.eval()
 
     # Load tickers
@@ -118,6 +134,14 @@ def main():
 
             if df is None or df.empty:
                 continue
+
+            if K.INDICATORS:
+                # Add technical indicators
+                df = add_technical_indicators(df)
+
+                # Handle any NaN values that might have been introduced
+                df.ffill(inplace=True)
+                df.bfill(inplace=True)
 
             normalized_df = normalize_with_rolling_mean(df)
             sequence = prepare_sequence(df, normalized_df)
